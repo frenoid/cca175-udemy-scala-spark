@@ -1,0 +1,191 @@
+spark-shell --master yarn \
+	--conf spark.ui.port=12654
+
+
+hadoop fs -ls /user/root/retail_db
+
+hadoop fs -du -s -h /user/root/retail_db
+
+
+spark-shell --master yarn \
+	--conf spark.ui.port=12654 \
+	--num-executors 2 \
+	--executor-memory 1G
+
+// initialize spark context
+import org.apache.spark.{SparkConf, SparkContext}
+val conf = new SparkConf().setAppName("Daily Revenue").setMaster("yarn-client")
+val sc = new SparkContext(conf)
+sc.getConf.getAll.foreach(println)
+
+// list files in hdfs
+hadoop fs -ls /user/root/retail_db/
+haddop fs -tail /user/root/retail_db/orders/part-00000
+
+// Create RDD with spark-shell
+spark-shell --master yarn \
+	--conf spark.ui.port=12654 \
+	--num-executors 1 \
+	--executor-memory 512M
+
+// Read the dataset into memory
+val orders = sc.textFile("/user/root/retail_db/orders") // note this uses the spark context to generate an RDD, it reads from hdfs
+
+val productsRaw = scala.io.Source.fromFile("/data/retail_db/products/part-00000").getLines.toList // this reads from local fs and returns a List (not an RDD)
+
+val productsRDD = sc.parallelize(productsRaw) //  this turns a List into an RDD
+
+// Exlore the dataset
+orders.first
+orders.take(5)
+orders.count
+
+
+// read json file
+val ordersDF = sqlContext.read.json("/user/root/retail_db_json/orders")
+ordersDF.show()
+ordersDF.printSchema()
+
+// use the map method to transform data
+// split on comma, take the 2nd element, replace the hyphen char, take only the first 8 char then cast to Int
+// (orderId, orderDate)
+val orderDates = orders.map((str: String) => str.split(",")(1).replace("-","").substring(0,8).toInt)
+
+val ordersPairedRDD = orders.map(order => {
+	val o = order.split(",")
+	(o(0).toInt, o(1).replace("-","").substring(0,8).toInt) // create a key value pair of orderId and orderDate
+})
+
+// Create the same key value pair for order_items
+// (orderId, orderItem)
+val orderItems = sc.textFile("/user/root/retail_db/order_items")
+val orderItemsPairedRDD = orderItems.map(orderItem => {
+	(orderItem.split(",")(1).toInt, orderItem)
+})
+
+
+// Row level transformation involving flatMap
+val l = List("Hello", "How are you doing", "Let us performing word count", "As part of the word count program", "we will see how many times each word repeats")  // this creates a string
+
+val l_rdd = sc.parallelize(l) // this creates an RDD from the String
+
+val l_flatMap = l_rdd.flatMap(ele => ele.split(" ")) // this flattens the Array into Array[String]
+
+val l_map = l_rdd.map(ele => ele.split(" ")) // in comparison, this will return Array[Array[String]]
+
+val wordCount = l_flatMap.map(word => (word, 1)).countByKey() // returns a Map[String,Long] which is the result of a count by key
+
+
+// Filtering data
+
+orders.filter(o => o.split(",")(3) == "COMPLETE") //  filtering on the orderStatus field
+
+val s = orders.first // take the first record of the RDD, returns String
+
+s.contains("COMPLETE") || s.contains("CLOSED") // tests for substring match
+
+s.split(",")(3) == "COMPLETE" || s.split(",")(3) == "CLOSED"  another way to test for substring match
+
+ (s.split(",")(3) == "COMPLETE" || s.split(",")(3) == "CLOSED")  && (s.split(",")(1).contains("2013-07-25")) // test for multiple contains, order status and date
+
+// Give all possible order statuses  
+
+
+orders.map(order => order.split(",")(3)).distinct.collect // Array[String] = Array(PENDING_PAYMENT, CLOSED, CANCELED, PAYMENT_REVIEW, PENDING, ON_HOLD, PROCESSING, SUSPECTED_FRAUD, COMPLETE)
+
+
+ // Get all orders from 2013-09 which are complete or closed
+
+val ordersFiltered = orders.filter(order => {
+	val o = order.split(",")
+	(o(1).contains("2013-09") && (o(3) == "CLOSED" || o(3) == "COMPLETE"))
+})
+
+// After each step, its good to validate your output using
+// .take()
+// .count
+// .collect.foreach(println) // avoid this for large datasets
+
+
+
+// joining 2 RDDs together
+// Create 2 RDDs of type  (key, value)
+// It's good practice to typecase data at an early stage
+// This makes the next transformations less prone to error
+
+val orders = sc.textFile("/user/root/retail_db/orders") // note this uses the spark context to generate an RDD, it reads from hdfs
+val ordersMap = orders.map(order => {
+	val o = order.split(",")
+	(o(0).toInt, o(1).substring(0, 10))
+})
+
+val orderItems = sc.textFile("/user/root/retail_db/order_items")
+val orderItemsMap = orderItems.map(orderItem => {
+	val oi = orderItem.split(",")
+	(oi(1).toInt, oi(4).toFloat)
+})
+
+val ordersJoin = ordersMap.join(orderItemsMap) // default join is an inner join
+
+
+// there is also leftOuterJoin ,  rightOuterJoin , fullOuterJoin
+// Get all the orders which do not have a corresponding entry in orderItems
+val orders = sc.textFile("/user/root/retail_db/orders") // note this uses the spark context to generate an RDD, it reads from hdfs
+val ordersMap = orders.map(order => {
+	val o = order.split(",")
+	(o(0).toInt, o)
+})
+
+val orderItems = sc.textFile("/user/root/retail_db/order_items")
+val orderItemsMap = orderItems.map(orderItem => {
+	val oi = orderItem.split(",")
+	(oi(1).toInt, oi)
+})
+
+val ordersLeftOuterJoin = ordersMap.leftOuterJoin(orderItemsMap)  //  left outer join, all records in the left table will be returned, Some is where there is a matching record, None means no matching record
+
+val ordersLeftOuterJoinFilter = ordersLeftOuterJoin.filter(order => order._2._2 == None) // extract the tuple and filter only those records which are equal to None
+
+ordersLeftOuterJoinFilter.count // 11452 orders have no corresponding orderItem
+
+val ordersWithNoOrderItems = ordersLeftOuterJoinFilter.map(order => order._2._1) // take only the order information, discard the Some/None information
+
+
+// You can accomplish the same using Right Outer Join
+val ordersRightOuterJoin = orderItemsMap.rightOuterJoin(ordersMap)
+val ordersRightOuterJoinFiltered = ordersRightOuterJoin.filter(order => order._2._1 == None)
+
+ordersRightOuterJoinFiltered.count
+
+val ordersWithNoOrderItems2 = ordersRightOuterJoinFiltered.map(order => order._2._2)
+
+// Aggregations - using actions
+
+val orders = sc.textFile("/user/root/retail_db/orders") 
+
+orders.map(o => (o.split(",")(3), "")).countByKey // transforms in to  (k,V) pair then count, returns occurences of each orderStatus. 
+
+// Output scala.collection.Map[String,Long] = Map(PAYMENT_REVIEW -> 729, CLOSED -> 7556, SUSPECTED_FRAUD -> 1558, PROCESSING -> 8275, COMPLETE -> 22899, PENDING -> 7610, PENDING_PAYMENT -> 15030, ON_HOLD -> 3798, CANCELED -> 1428)
+
+// Calculate revenue for 2013-09
+// First filter the orders in 2013-09
+// Join in the corresponding orderItems (inner join)
+// Find total revenue
+
+val orderItems = sc.textFile("/user/root/retail_db/order_items")
+
+val orderItemsRevenue = orderItems.map(oi => oi.split(",")(4).toFloat) // project only the revenue column
+
+orderItemsRevenue.reduce((total,revenue) => total+revenue) // use the reduce function to sum the revenue, orderItemsRevenue: Float = 3.4326256E7
+
+// Iterate down the list
+// Replace returning value if the next element is larger
+val orderItemsMaxRevenue = orderItemsRevenue.reduce((max, revenue) => {
+	if(max < revenue) revenue else max 
+})
+
+
+
+
+
+
