@@ -36,6 +36,7 @@ val productsRaw = scala.io.Source.fromFile("/data/retail_db/products/part-00000"
 val productsRDD = sc.parallelize(productsRaw) //  this turns a List into an RDD
 
 // Exlore the dataset
+val orders = sc.textFile("/user/root/retail_db/orders")
 orders.first
 orders.take(5)
 orders.count
@@ -89,8 +90,6 @@ s.split(",")(3) == "COMPLETE" || s.split(",")(3) == "CLOSED"  another way to tes
  (s.split(",")(3) == "COMPLETE" || s.split(",")(3) == "CLOSED")  && (s.split(",")(1).contains("2013-07-25")) // test for multiple contains, order status and date
 
 // Give all possible order statuses  
-
-
 orders.map(order => order.split(",")(3)).distinct.collect // Array[String] = Array(PENDING_PAYMENT, CLOSED, CANCELED, PAYMENT_REVIEW, PENDING, ON_HOLD, PROCESSING, SUSPECTED_FRAUD, COMPLETE)
 
 
@@ -114,12 +113,17 @@ val ordersFiltered = orders.filter(order => {
 // This makes the next transformations less prone to error
 
 val orders = sc.textFile("/user/root/retail_db/orders") // note this uses the spark context to generate an RDD, it reads from hdfs
+
+// Creates a (id, date) key-value pair
 val ordersMap = orders.map(order => {
 	val o = order.split(",")
 	(o(0).toInt, o(1).substring(0, 10))
 })
 
+// From hdfs, read text file of order_items
 val orderItems = sc.textFile("/user/root/retail_db/order_items")
+
+// Gen key-value pairs (id, revenue)
 val orderItemsMap = orderItems.map(orderItem => {
 	val oi = orderItem.split(",")
 	(oi(1).toInt, oi(4).toFloat)
@@ -159,11 +163,12 @@ ordersRightOuterJoinFiltered.count
 
 val ordersWithNoOrderItems2 = ordersRightOuterJoinFiltered.map(order => order._2._2)
 
+
 // Aggregations - using actions
 
 val orders = sc.textFile("/user/root/retail_db/orders") 
 
-orders.map(o => (o.split(",")(3), "")).countByKey // transforms in to  (k,V) pair then count, returns occurences of each orderStatus. 
+orders.map(o => (o.split(",")(3), "")).countByKey // transforms in to  (k,V) pair then count, returns occurences of each orderStatus.
 
 // Output scala.collection.Map[String,Long] = Map(PAYMENT_REVIEW -> 729, CLOSED -> 7556, SUSPECTED_FRAUD -> 1558, PROCESSING -> 8275, COMPLETE -> 22899, PENDING -> 7610, PENDING_PAYMENT -> 15030, ON_HOLD -> 3798, CANCELED -> 1428)
 
@@ -184,8 +189,233 @@ val orderItemsMaxRevenue = orderItemsRevenue.reduce((max, revenue) => {
 	if(max < revenue) revenue else max 
 })
 
+// Aggregations - reduceByKey
+val orderItems = sc.textFile("/user/root/retail_db/order_items")
+val orderItemsMap = orderItems.map(oi => {
+	(oi.split(",")(1).toInt , oi.split(",")(4).toFloat)
+})
+
+// Examine the (id, revenue) pairs
+orderItemsMap.take(10).foreach(println)
+
+// reduce by key - sum of revenue per order id
+val revenuePerOrderId = orderItemsMap.reduceByKey((total, revenue) => total + revenue)
+revenuePerOrderId.take(10).foreach(println)
+
+// get min revenue
+val minRevenuePerOrderId = orderItemsMap.reduceByKey((min, revenue) => if(min>revenue) revenue else min)
+minRevenuePerOrderId.take(10).foreach(println)
+
+// sort by key to validate
+orderItemsMap.sortByKey().take(10).foreach(println)
+minRevenuePerOrderId.sortByKey().take(10).foreach(println)
+
+//// Aggregations using aggregateByKey
+// reduceByKey and aggregateByKey uses combiners
+// aggregateByKey needs two arguments
+// Aggregations - reduceByKey
+
+val orderItems = sc.textFile("/user/root/retail_db/order_items")
+val orderItemsMap = orderItems.map(oi => {
+	(oi.split(",")(1).toInt , oi.split(",")(4).toFloat)
+})
+
+// notice the use of currying
+// input data is (orderId:Int, orderItemSubtotal:Float)
+// first param is initializor of final tuple (Float, Float), use of Float instead of Double avoids rounding errors
+// final output (orderId: Int, (orderRevenue: Float, maxOrderItemSubtotal: Float))
+
+val revenueAndMaxPerProductId = orderItemsMap.aggregateByKey((0.0f, 0.0f))(
+	(inter, subtotal) => (inter._1 + subtotal, if(subtotal > inter._2) subtotal else inter._2),	// inter is of type Tuple(intializor), subtotal is of type Float(input data)
+	(total, inter) => (total._1 + inter._1, if(total._2 > inter._2) total._2 else inter._2)
+)
+
+revenueAndMaxPerProductId.sortByKey().take(10).foreach(println)
+
+//// Sorting data using sortByKey
+
+// Use the products dataset for demonstration
+val products = sc.textFile("/user/root/retail_db/products")
+
+products.take(10).foreach(println)
+
+// Transform into a RDD of key-value pairs
+// (productCategory, product)
+val productsMap = products.map(product => {
+	(product.split(",")(1).toInt, product)
+})
+
+productsMap.take(10).foreach(println)
+
+// sortByKey
+// the use of false means sort by descending order
+val productsSortedByCategoryId = productsMap.sortByKey(false)
+productsSortedByCategoryId.take(10).foreach(println) 
+
+// sort in descending order by product price
+// we use a composite key here
+// ((productCategory, productPrice), product)
+// a filter is applied to remove empty strings
+// (a better way would be to use regex to deal with commas in product description)
+
+val productMap2 = products.filter(product => product.split(",")(4) != "").map(product => {
+	((product.split(",")(1).toInt, product.split(",")(4).toFloat), product)
+})
+
+productMap2.take(10).foreach(println)
+
+// Sort by both productCategory and productPrice in ascending order
+val productMap2Sorted = productMap2.sortByKey()
+
+productMap2Sorted.take(5).foreach(println)  
+
+// what if you one field in ascending order and another in descending order?
+// You could take the negative of one field. Either productCategory or productPrice
+
+// Let's discard the key to make the data more readable
+val productMap2SortedWithoutKey = productMap2Sorted.map(rec => rec._2)
+
+productMap2SortedWithoutKey.take(10).foreach(println) 
+
+//// sortByKey with take and takeOrdered 
+
+val products = sc.textFile("/user/root/retail_db/products")
+
+// (productPrice, product)
+
+val productsMap = products.filter(product => product.split(",")(4) != "").map(product => {
+	(product.split(",")(4).toFloat, product)
+})
+
+// Ranking - global (details of the top 10 products by price)
+val productsSortedByPrice = productsMap.sortByKey(false)
+productsSortedByPrice.take(10).foreach(println)
+
+
+// ranking without sortByKey or map
+val products = sc.textFile("/user/root/retail_db/products")
+
+// takeOrdered()() takes 2 arg
+// first is the number of records
+// second is class which implements Ordering
+val top10ProductsOrderedByPrice = products.
+						filter(product => product.split(",")(4) != "").
+						takeOrdered(10)(Ordering[Float].
+							reverse.on(product => product.split(",")(4).toFloat))
+
+// note takeOrdered returns Array
+// notice we did not use any Map or sortByKey
+top10ProductsOrderedByPrice.foreach(println)
+
+//// KeyRanking
+// Get top N priced products within each product catagory
+val products = sc.textFile("/user/root/retail_db/products")
+
+// produce pairs (productCategory, product)
+val productsMap = products.
+					filter(product => product.split(",")(4) != "").
+					map(product => (product.split(",")(1).toInt, product))
+
+
+// use groupByKey
+// returns RDD[(Int, Iterable(String))]
+val productsGroupByCategory = productsMap.groupByKey()
+
+productsGroupByCategory.take(10).foreach(println)
+
+// extract one element of the RDD into a Scala Collection
+val productsIterable = productsGroupByCategory.first._2
 
 
 
+// Function to take the top N elements of an Iterable of String
+def getTopNProducts(productsIterable: Iterable[String], topN: Int): Iterable[String] = {
+	// toSet to eliminate dupes
+	// toList to access sort method
+	val productPrices = productsIterable.map(p => p.split(",")(4).toFloat).toSet.toList
+
+	// Use List.sortBy
+	// default sort order is ASCENDING
+	// taking the negative makes it DESCENDING
+	val topNPrices = productPrices.sortBy(p => -p).take(topN)
+
+
+	// Get all the products in descending order by price
+	val productsSorted = productsIterable.toList.sortBy(p => -p.split(",")(4).toFloat)
+
+	// Take the lowest of the topNPrices
+	val minOfTopEndPrices = topNPrices.min
+
+	// filter iterates throught ALL records
+	// takeWhile runs until the first false condition
+	// since the data is pre-sorted, we get only the topN records by price
+	// we filter on minOfTopEndPrices to get all products
+	// whose prices are above that min
+	val topNPricedProducts = productsSorted.takeWhile(product => product.split(",")(4).toFloat >= minOfTopEndPrices)
+
+	topNPricedProducts
+}
+
+getTopNProducts(productsIterable, 10)
+
+// Order by category AND price
+// productsGroupByCategory: Array[(Int, Iterable[String])]
+// Map will return Iterable[Iterable[String]]
+// flatMap will return Iterable[String]
+// second flatMap param means the first 3 records
+val top3PricedProductsGroupByCategory = productsGroupByCategory.flatMap(rec => getTopNProducts(rec._2, 3))
+
+top3PricedProductsGroupByCategory.collect.foreach(println)
+
+
+//// Set operations
+// Different from join operations
+// Take 2 datasets of the same schema(same column count and data types) and dedupe them
+// Examples are union and intersection
+// Distinct is often used with union for deduplication
+
+val orders = sc.textFile("/user/root/retail_db/orders")
+orders.first
+
+// Filter on date, the 2nd column
+// Project only the customerId column, the 3rd column
+val customers_201308 = orders.
+	filter(o => o.split(",")(1).substring(0,7) == "2013-08").
+	map(o => o.split(",")(2).toInt)
+
+// Count distinct customer ids
+customers_201308.distinct.count
+
+val customers_201309 = orders.
+	filter(o => o.split(",")(1).substring(0,7) == "2013-09").
+	map(o => o.split(",")(2).toInt)
+
+customers_201309.distinct.count
+
+// Find all customers who placed orders in 2013-08 AND 2013-09
+
+val customers_201308_and_201309 = customers_201308.intersection(customers_201309)
+
+customers_201308_and_201309.count // 1689
+
+// All unique customers who placed orders in 2013-08 OR 2013-09
+
+val customers_201308_or_201309 = customers_201308.union(customers_201309)
+
+// distinct is need to dedupe after union
+customers_201308_or_201309.distinct.count  // 7516
+
+// Get all customers who place orders in 2013 August but not in 2013 September
+// add a junk value to enable leftOuterJoin
+// the join return None if rec not in 201309
+// project only the customerId field
+
+val customer_201308_minus_201309 = customers_201308.
+	map(c=>(c,1)).
+	leftOuterJoin(customers_201309.map(c => (c,1))).
+	filter(rec => rec._2._2 == None).
+	map(rec => rec._1)
+
+customer_201308_minus_201309.distinct.count // 2866
 
 
