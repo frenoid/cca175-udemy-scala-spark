@@ -419,3 +419,29 @@ val customer_201308_minus_201309 = customers_201308.
 customer_201308_minus_201309.distinct.count // 2866
 
 
+//// Saving RDD back to HDFS
+
+val orders = sc.textFile("/user/root/retail_db/orders")
+
+val orderCountByStatus = orders.
+	map(order => (order.split(",")(3), 1)).
+	countByKey
+
+// countByKey returns scala.collection.Map[String,Long]
+// it's not an RDD and cannot be written as a textFile
+
+
+val orderCountByStatus = orders.
+	map(order => (order.split(",")(3), 1)).
+	reduceByKey((total, element) => total + element)
+
+// reduceByKey returns org.apache.spark.rdd.RDD[(String, Int)]
+// this is an RDD
+
+orderCountByStatus.
+	map(rec => rec._1 + "\t" + rec._2).
+	saveAsTextFile("/user/root/output/order_count_by_status")
+
+// read back to verify
+val output = sc.textFile("/user/root/output/order_count_by_status")
+output.collect.foreach(println)
