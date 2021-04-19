@@ -1,0 +1,19 @@
+use retail_db data set
+
+Problem statement
+
+1) get daily revenue by product considering completed and closed orders
+2) data needs to be sorted in ascending order by date and then descending order by revenue computed for each product for each day
+3) data should be delimited by "," in this order - order_date,daily_revenue_per_product,product_name
+
+Data for orders and order_items is available in HDFS
+1) /user/root/retail_db/orders
+2) /user/root/retail_db/order_items
+
+Data for products is available locally under /data/retail_db/products
+
+Final output needs to be stored under
+1) HDFS location - avro format: /user/root/daily_revenue_avro_scala
+2) HDFS location - text format: /user/root/daily_revenue_txt_scala
+3) Local location /home/root/daily_revenue_scala
+4) Solution needs to be stored under /home/root/daily_revenue_scala.txt
